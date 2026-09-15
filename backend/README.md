@@ -1,67 +1,110 @@
 # Useful backend
 
-A small Cloudflare Worker API for an invite-only private site. Authentication is
-username-less and passwordless: users redeem a one-time invite to create a
-discoverable WebAuthn passkey, then receive an opaque, server-side session.
+Cloudflare Worker API for Useful, an invite-only, passwordless messaging app.
+It uses Hono, Cloudflare D1, WebAuthn passkeys, opaque server-side sessions, and
+stores only end-to-end encrypted message payloads.
 
-## Local setup
+See the [project README](../README.md) for the complete local setup.
+
+## Local development
 
 Requirements: Node.js, pnpm, and a browser with WebAuthn support.
 
 ```sh
 pnpm install
-cp .dev.vars.example .dev.vars
 pnpm db:migrate:local
 pnpm dev
 ```
 
-Create a seven-day local invite with `pnpm invite -- --local`. The command
-prints the raw invite once; only its SHA-256 digest is stored. Pass a lifetime
-of 1–90 days as the final argument, for example `pnpm invite -- --local 2`.
+Create an ignored `.dev.vars` file before starting the Worker:
 
-Run all checks with `pnpm check`.
+```env
+RP_NAME=Useful
+RP_ID=localhost
+APP_ORIGIN=http://localhost:5173
+```
+
+These development defaults expect the frontend at `http://localhost:5173`.
+Create a seven-day local invitation with:
+
+```sh
+pnpm invite -- --local
+```
+
+An optional final argument sets its lifetime from 1–90 days, for example
+`pnpm invite -- --local 2`. The raw token is shown once; D1 stores its SHA-256
+digest.
 
 ## Configuration
 
-- `APP_ORIGIN`: exact frontend origin, such as `http://localhost:5173` or
-  `https://private.example.com`.
-- `RP_ID`: WebAuthn relying-party domain without a scheme or port. Use
+- `APP_ORIGIN`: Exact frontend origin, including scheme and any port.
+- `RP_ID`: WebAuthn relying-party domain without scheme or port. Use
   `localhost` locally.
-- `RP_NAME`: human-readable name shown in the passkey prompt.
-- `DB`: Cloudflare D1 binding configured in `wrangler.jsonc`.
+- `RP_NAME`: Human-readable application name in passkey prompts.
+- `DB`: D1 binding declared in `wrangler.jsonc`.
 
-Replace the placeholder `database_id` in `wrangler.jsonc` after creating the
-D1 database. Keep `.dev.vars` local; set production variables through your
-Cloudflare deployment environment.
+Create a production D1 database and replace the placeholder `database_id` in
+`wrangler.jsonc` before deploying. Configure production variables through
+Cloudflare rather than committing them. `APP_ORIGIN` must match the origin
+received by the Worker; it validates WebAuthn ceremonies and mutations.
 
-## API
+## Database
 
-All request bodies are JSON and limited to 64 KiB.
-
-- `POST /api/auth/register/options` — `{ "inviteToken": "..." }`
-- `POST /api/auth/register/verify` — `{ "flowId": "...", "response": ... }`
-- `POST /api/auth/login/options`
-- `POST /api/auth/login/verify` — `{ "flowId": "...", "response": ... }`
-- `GET /api/auth/me`
-- `POST /api/auth/logout`
-- `GET /api/chat/conversations` — authenticated placeholder
-- `POST /api/chat/completions` — validated, authenticated placeholder
-- `GET /health` — process liveness
-- `GET /ready` — D1 readiness
-
-Challenges live for five minutes and are atomically consumed before WebAuthn
-verification. Sessions live for 30 days, are stored only as SHA-256 digests,
-and use `HttpOnly`, `SameSite=Strict` cookies (`Secure` on HTTPS).
-
-## Deploy
+Migrations create invitations, users, passkeys, challenges, sessions, messaging
+devices, conversations, encrypted messages, and per-device key envelopes.
 
 ```sh
+pnpm db:migrate:local
 pnpm db:migrate:remote
+pnpm db:cleanup:local
+pnpm db:cleanup:remote
+```
+
+Cleanup removes expired sessions and challenges, plus consumed or expired
+invites that are no longer referenced.
+
+## API overview
+
+Authentication:
+
+- `POST /api/auth/register/options`
+- `POST /api/auth/register/verify`
+- `POST /api/auth/login/options`
+- `POST /api/auth/login/verify`
+- `GET /api/auth/me`
+- `POST /api/auth/logout`
+- `GET|POST|PATCH|DELETE /api/auth/passkeys/...`
+
+Encrypted messaging:
+
+- `PUT /api/chat/devices/:deviceId`
+- `GET /api/chat/users/:userId/devices`
+- `GET|POST /api/chat/conversations`
+- `GET|POST /api/chat/conversations/:conversationId/messages`
+
+Status endpoints are `GET /health` and `GET /ready`. Mutation bodies are JSON,
+`/api` requests are limited to 64 KiB, and chat routes require a session.
+
+## Security
+
+Registration requires a one-time invitation. Authentication uses discoverable
+WebAuthn credentials, so no username or password is collected. Challenges live
+for five minutes and are atomically consumed. Sessions live for 30 days, are
+stored as SHA-256 digests, and use `HttpOnly`, `SameSite=Strict` cookies with
+`Secure` enabled over HTTPS.
+
+The backend receives ciphertext, nonces, public device keys, and encrypted key
+envelopes—not message plaintext. Conversation members, device IDs, timestamps,
+and traffic patterns remain visible metadata.
+
+## Checks and deployment
+
+```sh
 pnpm check
+pnpm db:migrate:remote
 pnpm deploy
 pnpm invite -- --remote
 ```
 
-Before public exposure, enable Cloudflare rate limiting for the authentication
-option and verification endpoints. Keeping it at the edge prevents invalid
-requests from consuming Worker or D1 capacity.
+Run migrations before deploying dependent code. Add Cloudflare rate limiting to
+authentication option and verification routes before public exposure.
